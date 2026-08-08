@@ -1,6 +1,6 @@
 /*
 This file is part of https://github.com/mocompute/odin-http.
-Version: 0.1
+Version: 0.1.1
 */
 package http
 
@@ -149,7 +149,7 @@ server_init :: proc(self: ^Server, handler: Handler = handler_echo, allocator :=
 
 	// preallocate a 503 message for server overload
 	res_error := Response {status=503}
-	self.server_503 = serialize_response(self, res_error, allocator, omit_date=true)
+	self.server_503 = serialize_response(self^, res_error, allocator, omit_date=true)
 }
 
 server_deinit :: proc(self: ^Server) {
@@ -217,7 +217,7 @@ on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 			}
 
 			// Close the client connection immediately.
-			send_503_and_close(server, op.accept.client)
+			send_503_and_close(server^, op.accept.client)
 
 			// Reopen our spare file descriptor.
 			server.null_fd = open_dev_null() or_else panic("failed to open /dev/null")
@@ -301,7 +301,7 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 	}
 
 	response := conn.server.request_handler(request)
-	bytes := serialize_response(conn.server, response, allocator)
+	bytes := serialize_response(conn.server^, response, allocator)
 	if response.keep_alive {
 		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
 	} else {
@@ -337,11 +337,11 @@ on_sent_close_no_conn :: proc(op: ^nbio.Operation) {
 
 send_and_close :: proc(conn: ^Connection, status_code: int) {
 	response := Response{status = status_code}
-	bytes := serialize_response(conn.server, response, virtual.arena_allocator(&conn.arena))
+	bytes := serialize_response(conn.server^, response, virtual.arena_allocator(&conn.arena))
 	conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
 }
 
-send_503_and_close :: proc(server: ^Server, socket: net.TCP_Socket)  {
+send_503_and_close :: proc(server: Server, socket: net.TCP_Socket)  {
 	nbio.send(socket, {server.server_503}, on_sent_close_no_conn)
 	// tick immediately, because we need a free socket back
 	nbio.tick()
@@ -373,7 +373,7 @@ handler_echo :: proc(req: Request) -> (res: Response) {
 	return
 }
 
-serialize_response :: proc(server: ^Server, res: Response, allocator: mem.Allocator, omit_date := false) -> []u8 {
+serialize_response :: proc(server: Server, res: Response, allocator: mem.Allocator, omit_date := false) -> []u8 {
 	sb := strings.builder_make(allocator)
 	strings.write_string(&sb, PROTOCOL_VERSION)
 	strings.write_string(&sb, " ")
@@ -421,7 +421,7 @@ serialize_response :: proc(server: ^Server, res: Response, allocator: mem.Alloca
 @(rodata)
 MONTHS := [12]string{"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"}
 
-rfc5322 :: proc(server: ^Server, t: time.Time, allocator: mem.Allocator) -> string {
+rfc5322 :: proc(server: Server, t: time.Time, allocator: mem.Allocator) -> string {
 	// https://www.rfc-editor.org/info/rfc5322/#section-3.3
 	dt := time.time_to_datetime(t) or_else panic("time_to_datetime failed")
 	year, month, day := time.date(t)
@@ -443,7 +443,7 @@ test_rfc5322 :: proc(t: ^testing.T) {
 	defer server_deinit(&server)
 
 	now := time.now()
-	s := rfc5322(&server, now, context.temp_allocator)
+	s := rfc5322(server, now, context.temp_allocator)
 
 	fmt.eprintln("res = ", s)
 }
