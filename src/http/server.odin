@@ -39,9 +39,6 @@ Response :: struct {
 	content: string,
 	keep_alive: bool,
 	is_websocket_handshake: bool,
-
-	// Can be set by handler if a websocket message is incomplete.
-	is_incomplete: bool,
 }
 
 Handler :: proc(Request) -> Response
