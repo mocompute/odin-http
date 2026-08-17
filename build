@@ -1,0 +1,319 @@
+#!/bin/sh
+#
+# This file is intended to work on Linux, Mac and Windows.
+# Windows support requires that SH.EXE be on the path, and that this script is invoked as
+#
+#     SH.EXE build <options>
+#
+# SH.EXE is provided by various things, including Git for Windows.
+#
+# Note that this script is intentionally limited to POSIX sh, and does not use Bash
+# extensions.
+
+set -euo pipefail
+
+: "${ODIN:=../../Odin/odin}"
+
+OS_NAME="$(uname -s)"
+is_windows=""
+case "$OS_NAME" in
+        MINGW*|MSYS*|CYGWIN*)
+                : "${CC:=cl.exe}"
+                : "${AR:=lib.exe}"
+                is_windows="1"
+                ;;
+        *)
+                : "${CC:=cc}"
+                : "${AR:=ar}"
+                ;;
+esac
+
+
+odin_collections=""
+odin_options="-thread-count:4 $odin_collections"
+check_options="-vet -strict-style -vet-tabs -warnings-as-errors"
+test_options="-define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_SHORT_LOGS=true -define:ODIN_TEST_THREADS=1"
+
+lib_dirs="
+"
+
+exe_dirs="
+        src/http
+"
+
+package_dirs="$lib_dirs $exe_dirs"
+
+opt_verbose=""
+opt_builds_to_run="$exe_dirs"
+opt_checks_to_run="$package_dirs"
+opt_tests_to_run="$package_dirs"
+
+run_builds()
+{
+        # Accepts $@ as extra build flags
+        if [ "$opt_builds_to_run" = "all" ]; then
+                opt_builds_to_run="$exe_dirs"
+        fi
+        for dir in $opt_builds_to_run; do
+                echo "Building $dir..."
+                echo "Options: $@ $odin_options $check_options"
+                "$ODIN" build $dir "$@" $odin_options $check_options
+        done
+}
+
+run_tests()
+{
+        # Accepts $@ as extra test flags
+        if [ "$opt_tests_to_run" = "all" ]; then
+                opt_tests_to_run="$package_dirs"
+        fi
+        for dir in $opt_tests_to_run; do
+                echo
+                echo "Testing: $dir..."
+                echo "Options: $@ $odin_options $check_options $test_options"
+                "$ODIN" test $dir "$@" $odin_options $check_options $test_options
+        done
+}
+
+run_checks() {
+        if [ "$opt_checks_to_run" = "all" ]; then
+                opt_checks_to_run="$package_dirs"
+        fi
+        for dir in $opt_checks_to_run; do
+                echo "Checking directory $dir..."
+                "$ODIN" check $dir $odin_options $check_options -no-entry-point
+        done
+}
+
+make_etags()
+{
+        odin_root=$("$ODIN" root)
+        tags_files=$(find "$odin_root/core" "$odin_root/base" src -name \*.odin)
+        etags						\
+        -r '/^\([^ \t]+\)[ \t]+::[ \t]+proc/\1/'	\
+        -r '/^\([^ \t]+\)[ \t]+::[ \t]+struct/\1/'	\
+        -r '/^\([^ \t]+\)[ \t]+::[ \t]+distinct/\1/'	\
+        -r '/^\([^ \t]+\)[ \t]+::[ \t]+enum/\1/'	\
+        -r '/^\([^ \t]+\)[ \t]+::[ \t]+union/\1/'	\
+        $tags_files
+}
+
+build_sqlite3()
+{
+        # https://sqlite.org/compile.html#recommended_compile_time_options
+        # Exceptions:
+        #  - THREADSAFE=2 https://sqlite.org/threadsafe.html
+
+        sqlite_options="
+        -DSQLITE_DQS=0
+        -DSQLITE_THREADSAFE=2
+        -DSQLITE_DEFAULT_MEMSTATUS=0
+        -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+        -DSQLITE_LIKE_DOESNT_MATCH_BLOBS
+        -DSQLITE_MAX_EXPR_DEPTH=0
+        -DSQLITE_OMIT_DECLTYPE
+        -DSQLITE_OMIT_DEPRECATED
+        -DSQLITE_OMIT_PROGRESS_CALLBACK
+        -DSQLITE_OMIT_SHARED_CACHE
+        -DSQLITE_STRICT_SUBTYPE=1
+        "
+        cwd=$(pwd)
+        cd src/vendor/sqlite3/sqlite-amalgamation-3530400
+
+        if [ -z "$is_windows" ]; then
+                echo "Compiling SQLite3..."
+                "$CC" -c -O2 $sqlite_options sqlite3.c
+                echo "Creating static library sqlite3.a..."
+                "$AR" rcs sqlite3.a sqlite3.o
+                echo "Done."
+        else
+                echo "Compiling SQLite3..."
+                "$CC" -nologo -O2 -c $sqlite_options sqlite3.c
+                echo "Creating static library sqlite3.lib..."
+                "$AR" -nologo sqlite3.obj -out:sqlite3.lib
+                echo "Done."
+        fi
+
+        cd "$cwd"
+}
+
+
+vendor_sqlite3()
+{
+        cwd=$(pwd)
+        cd src/vendor/sqlite3
+        if [ ! -f sqlite-amalgamation-3530400/sqlite3.c ]; then
+                echo "Downloading https://sqlite.org/2026/sqlite-amalgamation-3530400.zip..."
+                curl -O https://sqlite.org/2026/sqlite-amalgamation-3530400.zip
+                echo "Download complete."
+
+                if command -v fossil >/dev/null 2>&1; then
+                        echo "Verifying checksum..."
+                        fossil sha3sum sqlite-amalgamation-3530400.zip > downloaded.txt
+                        if diff checksums.txt downloaded.txt; then
+                                echo "Checksum verified."
+                                rm downloaded.txt
+                        else
+                                echo "WARNING: sqlite3 checksums do not match!!"
+                                exit 1
+                        fi
+                else
+                        echo "WARNING: fossil command not found: Cannot verify checksum!!"
+                        exit 1
+                fi
+
+                unzip -o sqlite-amalgamation-3530400.zip
+        else
+                echo "Source file exists, skipping download: sqlite-amalgamation-3530400/sqlite3.c"
+        fi
+        cd "$cwd"
+        build_sqlite3
+}
+
+clean_sqlite3()
+{
+        cwd=$(pwd)
+        cd src/vendor/sqlite3
+        rm -f *.o *.a *.obj *.lib
+        cd "$cwd"
+}
+
+
+
+usage()
+{
+        if [ -z "$is_windows" ]; then
+                echo "Usage: $0 [options] <command> [-- [command-options]]"
+        else
+                echo "Usage: SH.EXE $0 [options] <command> [-- [command-options]]"
+                echo "       ^^^^^^"
+                echo
+                echo "Building on Windows requires Git for Windows (for SH.EXE) and MSVC."
+        fi
+        echo
+        echo "Commands:"
+        echo "  build [all|directory]   Run all builds, or just a single directory."
+        echo "  check [all|directory]   Run all checks, or just a single directory."
+        echo "  run <directory>         Building and run the executable in directory."
+        echo "  tags                    Make emacs etags."
+        echo "  test [all|directory]    Run all tests, or just a single directory."
+        echo "  vendor sqlite3          Build SQLite3 from source, downloading if needed."
+}
+
+parse_options()
+{
+        while [ $# -gt 0 ]; do
+                case "$1" in
+                        -h | -help | --help )
+                                usage
+                                exit 0
+                                ;;
+                        -v | --verbose )
+                                opt_verbose="yes"
+                                ;;
+                        --)
+                                break
+                                ;;
+                esac
+                shift
+        done
+}
+
+shift_past_dash_dash()
+{
+        # Return the number of shifts needed to pass "--". If there is no "--", will return
+        # number of shifts to skip all remaining arguments.
+        n=0
+        while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+                shift
+                n=$((n + 1))
+        done
+        if [ "${1:-}" = "--" ]; then
+                n=$((n + 1))
+        fi
+        echo "$n"
+}
+
+
+parse_options "$@"
+
+if [ $# -eq 0 ]; then
+        usage
+        exit 1
+fi
+
+while [ $# -gt 0 ]; do
+        case "$1" in
+                "build" )
+                        if [ -n "${2:-}" ]; then
+                                opt_builds_to_run="$2"
+                                shift
+                        fi
+                        shift
+                        n=$(shift_past_dash_dash "$@")
+                        shift "$n"
+                        run_builds "$@"
+                        exit $?
+                        ;;
+
+                "check" )
+                        if [ -n "${2:-}" ]; then
+                                opt_checks_to_run="$2"
+                                shift
+                        fi
+                        n=$(shift_past_dash_dash "$@")
+                        shift "$n"
+                        run_checks "$@"
+                        exit $?
+                        ;;
+
+                "clean" )
+                        clean_sqlite3
+                        exit $?
+                        ;;
+
+                "run" )
+                        if [ -n "${2:-}" ]; then
+                                progname="$2"
+                                shift 2
+                                n=$(shift_past_dash_dash "$@")
+                                shift "$n"
+                                "$ODIN" run "$progname" $odin_options $check_options -- "$@"
+                        else
+                                usage
+                                exit 1
+                        fi
+                        exit $?
+                        ;;
+
+                "tags" )
+                        make_etags
+                        exit $?
+                        ;;
+
+                "test" )
+                        if [ -n "${2:-}" ]; then
+                                opt_tests_to_run="$2"
+                                shift
+                        fi
+                        n=$(shift_past_dash_dash "$@")
+                        shift "$n"
+                        run_tests "$@"
+                        exit $?
+                        ;;
+
+                "vendor" )
+                        case "${2:-}" in
+                                "sqlite3")
+                                        vendor_sqlite3
+                                        shift
+                                        ;;
+                        esac
+                        exit $?
+                        ;;
+                *)
+                        usage
+                        exit 1
+                        ;;
+        esac
+done
