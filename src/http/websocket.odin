@@ -26,7 +26,7 @@ Websocket_Opcode :: enum {
 }
 
 data_frame_parse :: proc(buf: []u8) -> (df: Websocket_Data_Frame, complete: bool) {
-	ensure(len(buf) >= 4)
+	if len(buf) < 4 do return
 
 	b0 := buf[0]
 	fin    := b0 & 0b1000_0000
@@ -44,28 +44,28 @@ data_frame_parse :: proc(buf: []u8) -> (df: Websocket_Data_Frame, complete: bool
 	if uint(plen) <= 125 {
 		payload_length = u64(plen)
 	} else if uint(plen) == 126 {
+		if len(buf) < pos + 2 do return
 		payload_length = u64(endian.unchecked_get_u16be(buf[pos:]))
 		pos += 2
 	} else if uint(plen) == 127 {
+		if len(buf) < pos + 8 do return
 		payload_length = u64(endian.unchecked_get_u64be(buf[pos:]))
 		pos += 8
 		payload_length &= 0x7fff_ffff_ffff_ffff // clear most significant bit
 	}
 
+	if len(buf) < pos + 4 do return
 	masking_key: [4]u8
 	if mask != 0 {
 		copy(masking_key[:], buf[pos:pos+4])
 		pos += 4
 	}
 
+	if u64(len(buf)) < u64(pos) + payload_length do return
+
 	encoded: []u8
-	if u64(len(buf)) < u64(pos) + payload_length {
-		complete = false
-		encoded = buf[pos:]
-	} else {
-		complete = true
-		encoded = buf[pos:u64(pos)+payload_length]
-	}
+	complete = true
+	encoded = buf[pos:u64(pos)+payload_length]
 
 	df.fin = fin != 0
 	df.rsv1 = rsv1 != 0
