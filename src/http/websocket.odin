@@ -25,7 +25,7 @@ Websocket_Opcode :: enum {
 	Pong,
 }
 
-data_frame_parse :: proc(buf: []u8) -> (df: Websocket_Data_Frame, complete: bool) {
+data_frame_parse :: proc(buf: []u8) -> (df: Websocket_Data_Frame, complete: bool, bytes_read: u64) {
 	if len(buf) < 4 do return
 
 	b0 := buf[0]
@@ -65,7 +65,8 @@ data_frame_parse :: proc(buf: []u8) -> (df: Websocket_Data_Frame, complete: bool
 
 	encoded: []u8
 	complete = true
-	encoded = buf[pos:u64(pos)+payload_length]
+	bytes_read = u64(pos)+payload_length
+	encoded = buf[pos:bytes_read]
 
 	df.fin = fin != 0
 	df.rsv1 = rsv1 != 0

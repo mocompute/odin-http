@@ -299,13 +299,14 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 
 	if conn.is_websocket {
 		df: Websocket_Data_Frame
+		bytes_read: u64
 		complete: bool
 
 		// Handle a recv which has not even received a full websocket frame.
 		if len(conn.read) < 4 {
 			complete = false
 		} else {
-			df, complete = data_frame_parse(conn.read[:])
+			df, complete, bytes_read = data_frame_parse(conn.read[:])
 		}
 		if !complete {
 			if is_timeout {
@@ -330,7 +331,15 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		if !df.fin {
 			data_frame_decode(&df)
 			append(&conn.message, ..df.encoded)
-			clear(&conn.read)
+
+			// If the read buffer extends into a following frame, we can't simply clear it.
+			if bytes_read < u64(len(conn.read)) {
+				remainder := u64(len(conn.read)) - bytes_read
+				copy(conn.read[:remainder], conn.read[bytes_read:])
+				resize(&conn.read, remainder)
+			} else {
+				clear(&conn.read)
+			}
 
 			// Queue another recv, with a timeout.
 			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
@@ -357,6 +366,11 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		} else {
 			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
 		}
+
+		// TODO: what if the read buffer contains more than one websocket frame?
+		// Right now, it gets dropped on the floor. This is pathological for
+		// typical request/response websocket dialogue, but I suppose some
+		// applications might run into this.
 	} else {
 		request, err := parse_http_message(conn.read[:], allocator)
 		if is_timeout && err == .Incomplete {
