@@ -59,9 +59,9 @@ test_websocket_handshake :: proc (t: ^testing.T) {
 	res, is_upgrade, status := maybe_websocket_upgrade(req, allocator)
 	testing.expect(t, is_upgrade)
 	testing.expect_value(t, status, 101)
-	fmt.eprintfln("Sec-WebSocket-Accept = %v", res.headers["sec-websocket-accept"])
+	fmt.eprintfln("Sec-WebSocket-Accept = %v", res.headers["Sec-WebSocket-Accept"])
 
-	testing.expect(t, client_verify_handshake(string(key_b64), res.headers["sec-websocket-accept"]))
+	testing.expect(t, client_verify_handshake(string(key_b64), res.headers["Sec-WebSocket-Accept"]))
 }
 
 

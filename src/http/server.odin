@@ -16,9 +16,6 @@ import "core:time"
 import "core:time/datetime"
 import "core:time/timezone"
 
-import "core:encoding/hex"
-
-
 INITIAL_BUFFER_SIZE :: 4 * 1024
 INITIAL_CONNECTION_BUFFERS :: 8
 CHUNK_SIZE :: 1024
@@ -301,30 +298,47 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 	conn.buffers[0] = nil	// arena
 
 	if conn.is_websocket {
-		df, complete := data_frame_parse(conn.read[:])
+		df: Websocket_Data_Frame
+		complete: bool
+
+		// Handle a recv which has not even received a full websocket frame.
+		if len(conn.read) < 4 {
+			complete = false
+		} else {
+			df, complete = data_frame_parse(conn.read[:])
+		}
 		if !complete {
+			if is_timeout {
+				// Message is still incomplete, even after a timed out recv. We need to
+				// hang up from our side and send a 408.
+				send_and_close(conn, 408)
+				return
+			}
 			// Frame is incomplete (length indicates more bytes to read). Queue another recv, with a timeout.
-			conn.buffers[0] = make([]u8, CHUNK_SIZE)
+			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
 			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
 			return
 		}
+
+		// From here, we hae a full websocket frame.
 
 		if conn.message == nil {
 			conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
 		}
 
+		// Check for websocket message fragmentation.
 		if !df.fin {
-			// websocket message fragmentation
 			data_frame_decode(&df)
 			append(&conn.message, ..df.encoded)
+			clear(&conn.read)
 
 			// Queue another recv, with a timeout.
-			conn.buffers[0] = make([]u8, CHUNK_SIZE)
+			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
 			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
 			return
 		}
 
-		// Complete message or end of fragmented message.
+		// From here, we have a complete message or end of fragmented message.
 		data_frame_decode(&df)
 		append(&conn.message, ..df.encoded)
 
