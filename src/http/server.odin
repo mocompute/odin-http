@@ -39,6 +39,8 @@ Response :: struct {
 	content: string,
 	keep_alive: bool,
 	is_websocket_handshake: bool,
+
+	ws_is_binary: bool,	// to specify websocket frame is binary (default text)
 }
 
 Handler :: proc(Request) -> Response
@@ -332,7 +334,7 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		response := conn.server.request_handler(request)
 
 		// Encode response in a websocket frame
-		bytes := data_frame_encode(.Binary, transmute([]u8)response.content, allocator)
+		bytes := data_frame_encode(response.ws_is_binary ? .Binary : .Text, transmute([]u8)response.content, allocator)
 
 		// Websocket handler can close connection by setting keep_alive to false.
 		// TODO: RFC6455 Sec. 5.5.1 Close is not yet supported.
