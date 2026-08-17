@@ -4,7 +4,7 @@ This file is part of https://github.com/mocompute/odin-http.
 package http
 
 import "core:container/xar"
-import "core:fmt"
+@(require) import "core:fmt"
 import "core:mem"
 import "core:mem/virtual"
 import "core:os"
@@ -15,9 +15,9 @@ import "core:sync"
 import "core:time"
 import "core:time/datetime"
 import "core:time/timezone"
-import "core:crypto/legacy/sha1"
-import "core:encoding/base64"
-import "core:unicode"
+
+import "core:encoding/hex"
+
 
 INITIAL_BUFFER_SIZE :: 4 * 1024
 INITIAL_CONNECTION_BUFFERS :: 8
@@ -79,7 +79,9 @@ Connection :: struct {
 	current_op: ^nbio.Operation,
 	buffers: [dynamic][]u8,
 	read: [dynamic]u8,
+
 	is_websocket: bool,
+	message: [dynamic]u8,
 }
 
 // Initialize a brand new connection: creates a virtual arena.
@@ -120,8 +122,10 @@ connection_release :: proc(conn: ^Connection, add_to_free_list := true) {
 	conn.socket = {}
 	conn.current_op = nil
 	conn.buffers = nil
-	conn.is_websocket = false
 	clear(&conn.read)
+
+	conn.is_websocket = false
+	conn.message = nil
 }
 
 // Release buffers to prepare connection for another message on the same socket.
@@ -298,29 +302,49 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 	conn.buffers[0] = nil	// arena
 
 	if conn.is_websocket {
-		fmt.eprintfln("on_recv: websocket conn = %p", conn)
-		request: Request
-		request.content = string(conn.read[:])
-		request.is_websocket = true
-		response := conn.server.request_handler(request)
-		if response.is_incomplete {
-			// Message is incomplete. Queue another recv, with a timeout.
+		df, complete := data_frame_parse(conn.read[:])
+		if !complete {
+			// Frame is incomplete (length indicates more bytes to read). Queue another recv, with a timeout.
 			conn.buffers[0] = make([]u8, CHUNK_SIZE)
 			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
 			return
+		}
+
+		if conn.message == nil {
+			conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
+		}
+
+		if !df.fin {
+			// websocket message fragmentation
+			data_frame_decode(&df)
+			append(&conn.message, ..df.encoded)
+
+			// Queue another recv, with a timeout.
+			conn.buffers[0] = make([]u8, CHUNK_SIZE)
+			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
+			return
+		}
+
+		// Complete message or end of fragmented message.
+		data_frame_decode(&df)
+		append(&conn.message, ..df.encoded)
+
+		request: Request
+		request.is_websocket = true
+		request.content = string(conn.message[:])
+		response := conn.server.request_handler(request)
+
+		// Encode response in a websocket frame
+		bytes := data_frame_encode(.Binary, transmute([]u8)response.content, allocator)
+
+		// Websocket handler can close connection by setting keep_alive to false.
+		// TODO: RFC6455 Sec. 5.5.1 Close is not yet supported.
+		if response.keep_alive {
+			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
 		} else {
-			// Websocket handler can close connection by setting keep_alive to false.
-			bytes := transmute([]u8) response.content
-			if response.keep_alive {
-				fmt.eprintfln("on_recv: sending ws reply: '%s'", response.content)
-				conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
-			} else {
-				fmt.eprintfln("on_recv: sending ws reply and close: '%s'", response.content)
-				conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
-			}
+			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
 		}
 	} else {
-		fmt.eprintfln("on_recv: normal conn = %p", conn)
 		request, err := parse_http_message(conn.read[:], allocator)
 		if is_timeout && err == .Incomplete {
 			// Message is still incomplete, even after a timed out recv. We need to
@@ -330,7 +354,7 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		}
 		if err == .Incomplete {
 			// Message is incomplete. Queue another recv, with a timeout.
-			conn.buffers[0] = make([]u8, CHUNK_SIZE)
+			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
 			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
 			return
 		}
@@ -344,7 +368,6 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 
 		// If we see a websocket handshake, upgrade this connection
 		if response.is_websocket_handshake {
-			fmt.eprintfln("on_recv: setting websocket on %p", conn)
 			conn.is_websocket = true
 		}
 
@@ -483,84 +506,4 @@ rfc5322 :: proc(server: Server, t: time.Time, allocator: mem.Allocator) -> strin
 	return fmt.aprintf("%2.d %s %4.d %2.d:%2.d:%2.d +0000",
 			   day, MONTHS[int(month)-1], year,
 			   dt.hour, dt.minute, dt.second, allocator=allocator)
-}
-
-maybe_websocket_upgrade :: proc(req: Request, allocator: mem.Allocator) -> (res: Response, is_upgrade: bool, status: int) {
-	is_websocket_upgrade :: proc(req: Request) -> bool {
-		buf: [32]u8
-		value, lc: string
-		ok: bool
-
-		if value, ok = req.headers["upgrade"]; ok {
-			lc = to_lower(value, buf[:])
-			if lc == "websocket" {
-				if value, ok = req.headers["connection"]; ok {
-					lc = to_lower(value, buf[:])
-					if lc == "upgrade" {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-	is_good_version :: proc(req: Request) -> bool {
-		if version, has_version := req.headers["sec-websocket-version"]; has_version {
-			if version == "13" {
-				return true
-			}
-		}
-		return false
-	}
-	has_handshake_key :: proc(req: Request) -> bool {
-		_, ok := req.headers["sec-websocket-key"]
-		return ok
-	}
-	handshake :: proc(req: Request, allocator: mem.Allocator) -> (res: Response) {
-		buf: [256]u8
-		hash: [sha1.DIGEST_SIZE]u8
-		ctx: sha1.Context
-
-		key := req.headers["sec-websocket-key"]
-		copy(buf[:], transmute([]u8)key)
-
-		uuid := WEBSOCKET_MAGIC
-		copy(buf[len(key):], transmute([]u8)uuid)
-
-		payload := buf[:len(key)+len(uuid)]
-
-		sha1.init(&ctx)
-		sha1.update(&ctx, payload)
-		sha1.final(&ctx, hash[:])
-		hash_b64, err := base64.encode_into_buf(buf[:], hash[:])
-		if err != nil {
-			res.status = 500
-			return
-		}
-
-		res.headers = make(map[string]string, allocator)
-		res.headers["Sec-WebSocket-Accept"] = strings.clone(string(hash_b64), allocator)
-		res.headers["Upgrade"] = "websocket"
-		res.headers["Connection"] = "Upgrade"
-		res.is_websocket_handshake = true
-		res.status = 101
-		return
-	}
-
-	if !is_websocket_upgrade(req) do return {}, false, 0
-	if !is_good_version(req) do return {}, false, 400
-	if !has_handshake_key(req) do return {}, false, 400
-
-	res = handshake(req, allocator)
-	return res, true, res.status
-}
-
-
-// A non-allocating version of strings.to_lower
-to_lower :: proc(s: string, buf: []u8) -> (res: string)  {
-	b := strings.builder_from_bytes(buf)
-	for r in s {
-		strings.write_rune(&b, unicode.to_lower(r))
-	}
-	return strings.to_string(b)
 }
