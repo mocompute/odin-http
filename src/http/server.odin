@@ -30,6 +30,7 @@ Request :: struct {
 	target: string,
 	headers: map[string]string,
 	content: string,
+	is_websocket: bool,
 }
 
 Response :: struct {
@@ -38,6 +39,9 @@ Response :: struct {
 	content: string,
 	keep_alive: bool,
 	is_websocket_handshake: bool,
+
+	// Can be set by handler if a websocket message is incomplete.
+	is_incomplete: bool,
 }
 
 Handler :: proc(Request) -> Response
@@ -75,6 +79,7 @@ Connection :: struct {
 	current_op: ^nbio.Operation,
 	buffers: [dynamic][]u8,
 	read: [dynamic]u8,
+	is_websocket: bool,
 }
 
 // Initialize a brand new connection: creates a virtual arena.
@@ -91,6 +96,7 @@ connection_reinit :: proc(conn: ^Connection, server: ^Server, socket: nbio.TCP_S
 	conn.server = server
 	conn.socket = socket
 	conn.current_op = nil
+	conn.is_websocket = false
 
 	allocator := virtual.arena_allocator(&conn.arena)
 	conn.buffers = make([dynamic][]u8, 0, 8, allocator)
@@ -114,6 +120,7 @@ connection_release :: proc(conn: ^Connection, add_to_free_list := true) {
 	conn.socket = {}
 	conn.current_op = nil
 	conn.buffers = nil
+	conn.is_websocket = false
 	clear(&conn.read)
 }
 
@@ -121,8 +128,13 @@ connection_release :: proc(conn: ^Connection, add_to_free_list := true) {
 connection_recycle :: proc(conn: ^Connection) {
 	server := conn.server
 	socket := conn.socket
+
+	// save and restore websocket connection state since this is a
+	// recycled connection for the same client.
+	is_websocket := conn.is_websocket
 	connection_release(conn, add_to_free_list=false)
 	connection_reinit(conn, server, socket)
+	conn.is_websocket = is_websocket
 }
 
 // Deallocate all buffers allocated by the connection.
@@ -285,31 +297,63 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 	append(&conn.read, ..conn.buffers[0][:op.recv.received])
 	conn.buffers[0] = nil	// arena
 
-	request, err := parse_http_message(conn.read[:], allocator)
-	if is_timeout && err == .Incomplete {
-		// Message is still incomplete, even after a timed out recv. We need to
-		// hang up from our side and send a 408.
-		send_and_close(conn, 408)
-		return
-	}
-	if err == .Incomplete {
-		// Message is incomplete. Queue another recv, with a timeout.
-		conn.buffers[0] = make([]u8, CHUNK_SIZE)
-		conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
-		return
-	}
-	if err != nil {
-		message := protocol_error_to_response(err, allocator)
-		conn.current_op = nbio.send_poly(conn.socket, {transmute([]u8)message}, conn, on_sent_close)
-		return
-	}
-
-	response := conn.server.request_handler(request)
-	bytes := serialize_response(conn.server^, response, allocator)
-	if response.keep_alive || response.is_websocket_handshake {
-		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
+	if conn.is_websocket {
+		fmt.eprintfln("on_recv: websocket conn = %p", conn)
+		request: Request
+		request.content = string(conn.read[:])
+		request.is_websocket = true
+		response := conn.server.request_handler(request)
+		if response.is_incomplete {
+			// Message is incomplete. Queue another recv, with a timeout.
+			conn.buffers[0] = make([]u8, CHUNK_SIZE)
+			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
+			return
+		} else {
+			// Websocket handler can close connection by setting keep_alive to false.
+			bytes := transmute([]u8) response.content
+			if response.keep_alive {
+				fmt.eprintfln("on_recv: sending ws reply: '%s'", response.content)
+				conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
+			} else {
+				fmt.eprintfln("on_recv: sending ws reply and close: '%s'", response.content)
+				conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+			}
+		}
 	} else {
-		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+		fmt.eprintfln("on_recv: normal conn = %p", conn)
+		request, err := parse_http_message(conn.read[:], allocator)
+		if is_timeout && err == .Incomplete {
+			// Message is still incomplete, even after a timed out recv. We need to
+			// hang up from our side and send a 408.
+			send_and_close(conn, 408)
+			return
+		}
+		if err == .Incomplete {
+			// Message is incomplete. Queue another recv, with a timeout.
+			conn.buffers[0] = make([]u8, CHUNK_SIZE)
+			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
+			return
+		}
+		if err != nil {
+			message := protocol_error_to_response(err, allocator)
+			conn.current_op = nbio.send_poly(conn.socket, {transmute([]u8)message}, conn, on_sent_close)
+			return
+		}
+
+		response := conn.server.request_handler(request)
+
+		// If we see a websocket handshake, upgrade this connection
+		if response.is_websocket_handshake {
+			fmt.eprintfln("on_recv: setting websocket on %p", conn)
+			conn.is_websocket = true
+		}
+
+		bytes := serialize_response(conn.server^, response, allocator)
+		if response.keep_alive || response.is_websocket_handshake {
+			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
+		} else {
+			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+		}
 	}
 
 }
@@ -495,9 +539,9 @@ maybe_websocket_upgrade :: proc(req: Request, allocator: mem.Allocator) -> (res:
 		}
 
 		res.headers = make(map[string]string, allocator)
-		res.headers["sec-websocket-accept"] = strings.clone(string(hash_b64), allocator)
-		res.headers["upgrade"] = "websocket"
-		res.headers["connection"] = "Upgrade"
+		res.headers["Sec-WebSocket-Accept"] = strings.clone(string(hash_b64), allocator)
+		res.headers["Upgrade"] = "websocket"
+		res.headers["Connection"] = "Upgrade"
 		res.is_websocket_handshake = true
 		res.status = 101
 		return
