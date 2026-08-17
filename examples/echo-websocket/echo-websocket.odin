@@ -32,10 +32,11 @@ interrupt :: proc "c" (sig: libc.int) {
 
 handler_echo :: proc(req: http.Request) -> (res: http.Response) {
 	if req.is_websocket {
-		// Websocket session already established. Binary message is in req.content.
-		// Send binary response in res.content.
+		// Websocket session already established.
+		// Send response in res.content.
 		// Set res.keep_alive to true to keep connection open.
-		fmt.eprintln("handler_echo: content = ", req.content)
+		// RFC6455 Sec. 5.5.1 Close protocol is not supported, but is not required by RFC.
+		// Default response frame is text; set res.ws_is_binary to select binary.
 		res.keep_alive = true
 		res.content = req.content // echo
 	} else {

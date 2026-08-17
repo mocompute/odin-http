@@ -11,6 +11,9 @@ with it from the outside world, and rather than build your own TCP protocol, HTT
 you a very simple foundation: verbs, targets, metadata, and data. A full
 batteries-included HTTP server is overkill for that use case.
 
+**Update:** Well, I added WebSockets support, because I need it for
+something I'm working on. So it's not quite minimal anymore.
+
 ## Features
 
 - Single-threaded operation using [nbio](https://pkg.odin-lang.org/core/nbio/).
@@ -20,6 +23,7 @@ batteries-included HTTP server is overkill for that use case.
   [virtual](https://pkg.odin-lang.org/core/mem/virtual/) memory.
 - Decent performance: echo server provides 75,000 req/sec on Linux, 50,000 req/sec on
   Windows. Real workloads will of course have higher latency.
+- WebSockets upgrade and framing.
 
 ## Overview
 
