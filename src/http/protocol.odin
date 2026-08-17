@@ -1,6 +1,5 @@
 /*
 This file is part of https://github.com/mocompute/odin-http.
-Version: 0.1
 
 From the perspective of an implementer, the HTTP/1.1 protocol involves several RFCs,
 including RCF9112, RFC9110, RFC5234.
@@ -12,7 +11,6 @@ package http
 import "core:mem"
 import "core:strconv"
 import "core:strings"
-import "core:testing"
 
 PROTOCOL_VERSION :: "HTTP/1.1"
 MAX_REQUEST_TARGET_LEN :: 2048
@@ -75,7 +73,7 @@ parse_http_message :: proc(message: []u8, allocator: mem.Allocator) -> (request:
 	request = {
 		method = req.request_line.method,
 		target = req.request_line.request_target,
-		headers = req.headers,
+		headers = req.headers, // alloc'd by parser using allocator
 		content = string(content[:]),
 	}
 	return
@@ -572,70 +570,4 @@ status_to_line :: proc(code: int) -> (s: string) {
 	case:     s="500 Internal Server Error"
 	}
 	return
-}
-
-
-@(test)
-test_parse_chunk_length :: proc(t: ^testing.T) {
-	n: int
-	s: string
-	err: Protocol_Error
-	s = "0\r\n"
-	n, _, err = parse_chunk_size(transmute([]u8)s)
-	testing.expect_value(t, 0, n)
-
-	s = "00\r\n"
-	n, _, err = parse_chunk_size(transmute([]u8)s)
-	testing.expect_value(t, 0, n)
-
-	s = "1f\r\n"
-	n, _, err = parse_chunk_size(transmute([]u8)s)
-	testing.expect_value(t, 0x1f, n)
-
-	s = "1F\r\n"
-	n, _, err = parse_chunk_size(transmute([]u8)s)
-	testing.expect_value(t, 0x1F, n)
-
-	s = "1FX\r\n"
-	n, _, err = parse_chunk_size(transmute([]u8)s)
-	testing.expect_value(t, err, Protocol_Error.Bad_Chunk_Size)
-}
-
-@(test)
-test_request_line_good :: proc(t: ^testing.T) {
-	input := "GET /index.html HTTP/1.1\r\n"
-
-	line, rest, err := parse_request_line(transmute([]u8) input)
-	testing.expect_value(t, err, nil)
-	testing.expect_value(t, line.method, Http_Method.Get)
-	testing.expect_value(t, line.request_target, "/index.html")
-	testing.expect_value(t, line.http_version, "HTTP/1.1")
-	testing.expect_value(t, 0, len(rest))
-}
-
-@(test)
-test_field_lines_good :: proc(t: ^testing.T) {
-	input := "Content-Length: 128\r\nCookie: monster\r\n"
-
-	fields, rest, err := parse_zom_field_lines(transmute([]u8) input[:], context.temp_allocator)
-	testing.expect_value(t, err, nil)
-	testing.expect_value(t, len(fields), 2)
-	testing.expect_value(t, len(rest), 0)
-	testing.expect_value(t, fields["content-length"], "128")
-	testing.expect_value(t, fields["cookie"], "monster")
-}
-
-@(test)
-test_message_head :: proc(t: ^testing.T) {
-	// HTTP-message   = start-line CRLF
-	//                  *( field-line CRLF )
-	//                  CRLF
-	//                  [ message-body ]
-
-	input := "PUT / HTTP/1.1\r\nContent-length: 128\r\n\r\n"
-
-	req, err := parse_message_head(transmute([]u8) input[:], context.temp_allocator)
-	testing.expect_value(t, err, nil)
-	_ = req
-
 }

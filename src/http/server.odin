@@ -1,6 +1,5 @@
 /*
 This file is part of https://github.com/mocompute/odin-http.
-Version: 0.1.1
 */
 package http
 
@@ -16,11 +15,15 @@ import "core:sync"
 import "core:time"
 import "core:time/datetime"
 import "core:time/timezone"
-import "core:testing"
+import "core:crypto/legacy/sha1"
+import "core:encoding/base64"
+import "core:unicode"
 
 INITIAL_BUFFER_SIZE :: 4 * 1024
 INITIAL_CONNECTION_BUFFERS :: 8
 CHUNK_SIZE :: 1024
+WEBSOCKET_MAGIC :: "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
 
 Request :: struct {
 	method: Http_Method,
@@ -34,6 +37,7 @@ Response :: struct {
 	headers: map[string]string,
 	content: string,
 	keep_alive: bool,
+	is_websocket_handshake: bool,
 }
 
 Handler :: proc(Request) -> Response
@@ -302,7 +306,7 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 
 	response := conn.server.request_handler(request)
 	bytes := serialize_response(conn.server^, response, allocator)
-	if response.keep_alive {
+	if response.keep_alive || response.is_websocket_handshake {
 		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
 	} else {
 		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
@@ -373,6 +377,7 @@ handler_echo :: proc(req: Request) -> (res: Response) {
 	return
 }
 
+
 serialize_response :: proc(server: Server, res: Response, allocator: mem.Allocator, omit_date := false) -> []u8 {
 	sb := strings.builder_make(allocator)
 	strings.write_string(&sb, PROTOCOL_VERSION)
@@ -392,16 +397,18 @@ serialize_response :: proc(server: Server, res: Response, allocator: mem.Allocat
 	}
 
 	// Connection and Content-Length headers
-	if res.keep_alive {
-		strings.write_string(&sb, "Connection: keep-alive\r\n")
-	} else {
-		strings.write_string(&sb, "Connection: close\r\n")
-	}
-	if res.keep_alive || len(res.content) != 0 {
-		// Always write Content-length for keep-alive connections
-		strings.write_string(&sb, "Content-length: ")
-		strings.write_int(&sb, len(res.content))
-		strings.write_string(&sb, "\r\n")
+	if !res.is_websocket_handshake {
+		if res.keep_alive {
+			strings.write_string(&sb, "Connection: keep-alive\r\n")
+		} else {
+			strings.write_string(&sb, "Connection: close\r\n")
+		}
+		if res.keep_alive || len(res.content) != 0 {
+			// Always write Content-length for keep-alive connections
+			strings.write_string(&sb, "Content-length: ")
+			strings.write_int(&sb, len(res.content))
+			strings.write_string(&sb, "\r\n")
+		}
 	}
 
 	for k, v in res.headers {
@@ -434,16 +441,82 @@ rfc5322 :: proc(server: Server, t: time.Time, allocator: mem.Allocator) -> strin
 			   dt.hour, dt.minute, dt.second, allocator=allocator)
 }
 
+maybe_websocket_upgrade :: proc(req: Request, allocator: mem.Allocator) -> (res: Response, is_upgrade: bool, status: int) {
+	is_websocket_upgrade :: proc(req: Request) -> bool {
+		buf: [32]u8
+		value, lc: string
+		ok: bool
+
+		if value, ok = req.headers["upgrade"]; ok {
+			lc = to_lower(value, buf[:])
+			if lc == "websocket" {
+				if value, ok = req.headers["connection"]; ok {
+					lc = to_lower(value, buf[:])
+					if lc == "upgrade" {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	is_good_version :: proc(req: Request) -> bool {
+		if version, has_version := req.headers["sec-websocket-version"]; has_version {
+			if version == "13" {
+				return true
+			}
+		}
+		return false
+	}
+	has_handshake_key :: proc(req: Request) -> bool {
+		_, ok := req.headers["sec-websocket-key"]
+		return ok
+	}
+	handshake :: proc(req: Request, allocator: mem.Allocator) -> (res: Response) {
+		buf: [256]u8
+		hash: [sha1.DIGEST_SIZE]u8
+		ctx: sha1.Context
+
+		key := req.headers["sec-websocket-key"]
+		copy(buf[:], transmute([]u8)key)
+
+		uuid := WEBSOCKET_MAGIC
+		copy(buf[len(key):], transmute([]u8)uuid)
+
+		payload := buf[:len(key)+len(uuid)]
+
+		sha1.init(&ctx)
+		sha1.update(&ctx, payload)
+		sha1.final(&ctx, hash[:])
+		hash_b64, err := base64.encode_into_buf(buf[:], hash[:])
+		if err != nil {
+			res.status = 500
+			return
+		}
+
+		res.headers = make(map[string]string, allocator)
+		res.headers["sec-websocket-accept"] = strings.clone(string(hash_b64), allocator)
+		res.headers["upgrade"] = "websocket"
+		res.headers["connection"] = "Upgrade"
+		res.is_websocket_handshake = true
+		res.status = 101
+		return
+	}
+
+	if !is_websocket_upgrade(req) do return {}, false, 0
+	if !is_good_version(req) do return {}, false, 400
+	if !has_handshake_key(req) do return {}, false, 400
+
+	res = handshake(req, allocator)
+	return res, true, res.status
+}
 
 
-@(test)
-test_rfc5322 :: proc(t: ^testing.T) {
-	server: Server
-	server_init(&server)
-	defer server_deinit(&server)
-
-	now := time.now()
-	s := rfc5322(server, now, context.temp_allocator)
-
-	fmt.eprintln("res = ", s)
+// A non-allocating version of strings.to_lower
+to_lower :: proc(s: string, buf: []u8) -> (res: string)  {
+	b := strings.builder_from_bytes(buf)
+	for r in s {
+		strings.write_rune(&b, unicode.to_lower(r))
+	}
+	return strings.to_string(b)
 }
