@@ -39,6 +39,7 @@ handler_echo :: proc(req: http.Request) -> (res: http.Response) {
 		// Default response frame is text; set res.ws_is_binary to select binary.
 		res.keep_alive = true
 		res.content = req.content // echo
+		res.ws_is_binary = req.ws_is_binary
 	} else {
 		// Check for websocket upgrade request
 		is_upgrade: bool

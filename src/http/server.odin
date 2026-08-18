@@ -27,7 +27,9 @@ Request :: struct {
 	target: string,
 	headers: map[string]string,
 	content: string,
+
 	is_websocket: bool,
+	ws_is_binary: bool,
 }
 
 Response :: struct {
@@ -410,6 +412,7 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 
 	request: Request
 	request.is_websocket = true
+	request.ws_is_binary = df.opcode == .Binary
 	request.content = string(conn.message[:])
 	response := conn.server.request_handler(request)
 	conn.message = nil	// arena

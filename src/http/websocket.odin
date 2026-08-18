@@ -9,7 +9,7 @@ import "core:unicode"
 
 Websocket_Data_Frame :: struct {
 	fin, rsv1, rsv2, rsv3, mask: bool,
-	opcode: u8,
+	opcode: Websocket_Opcode,
 	length: u64,
 	masking_key: [4]u8,
 	encoded: []u8,
@@ -73,7 +73,7 @@ data_frame_parse :: proc(buf: []u8) -> (df: Websocket_Data_Frame, complete: bool
 	df.rsv2 = rsv2 != 0
 	df.rsv3 = rsv3 != 0
 	df.mask = mask != 0
-	df.opcode = opcode
+	df.opcode = data_frame_opcode(opcode)
 	df.length = payload_length
 	df.masking_key = masking_key
 	df.encoded = encoded
