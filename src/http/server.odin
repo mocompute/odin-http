@@ -385,8 +385,9 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 		expected_continuation := conn.message_opcode != .Continuation && conn.is_fragmented &&
 			(df.opcode == .Text || df.opcode == .Binary)
 		unexpected_continuation := df.opcode == .Continuation && !conn.is_fragmented
+		invalid_opcode := df.opcode == .Invalid
 
-		if reserved_bit_set || invalid_control || non_continuation || expected_continuation || unexpected_continuation {
+		if invalid_opcode || reserved_bit_set || invalid_control || non_continuation || expected_continuation || unexpected_continuation {
 			// fmt.eprintfln("reserved_bit=%v, invalid_control=%v, non_continuation=%v, expected_cont=%v", reserved_bit_set, invalid_control, non_continuation, expected_continuation)
 			payload: [2]u8
 			endian.unchecked_put_u16be(payload[:], 1002)

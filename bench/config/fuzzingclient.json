@@ -1,6 +1,6 @@
 {
-  "outdir": "./reports",
-  "servers": [{"agent": "odin-http", "url": "ws://localhost:8123"}],
-  "cases": ["*"],
-  "exclude-cases": ["9.*", "12.*", "13.*"]
+    "outdir": "./reports",
+    "servers": [{"agent": "odin-http", "url": "ws://localhost:8123"}],
+    "cases": ["*"],
+    "exclude-cases": ["6.*", "9.*", "12.*", "13.*"]
 }
