@@ -80,7 +80,9 @@ Connection :: struct {
 
 	is_websocket: bool,
 	message: [dynamic]u8,
+	message_opcode: Websocket_Opcode,
 	more_frames: []u8,
+
 }
 
 // Initialize a brand new connection: creates a virtual arena.
@@ -125,6 +127,7 @@ connection_release :: proc(conn: ^Connection, add_to_free_list := true) {
 
 	conn.is_websocket = false
 	conn.message = nil
+	conn.message_opcode = .Continuation
 }
 
 // Release buffers to prepare connection for another message on the same socket.
@@ -383,6 +386,11 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 		conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
 	}
 
+	// Record initial opcode (text/binary)
+	if df.opcode != .Continuation {
+		conn.message_opcode = df.opcode
+	}
+
 	// Check for websocket message fragmentation.
 	if !df.fin {
 		data_frame_decode(&df)
@@ -412,7 +420,7 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 
 	request: Request
 	request.is_websocket = true
-	request.ws_opcode = df.opcode
+	request.ws_opcode = conn.message_opcode
 	request.content = string(conn.message[:])
 	response := conn.server.request_handler(request)
 	conn.message = nil	// arena
