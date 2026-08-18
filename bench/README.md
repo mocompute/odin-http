@@ -8,3 +8,5 @@ docker run -it --rm \
   crossbario/autobahn-testsuite \
   wstest -m fuzzingclient -s /config/fuzzingclient.json
 ```
+
+Run against the `examples/echo-websocket` program.
