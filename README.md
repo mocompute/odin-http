@@ -14,6 +14,15 @@ batteries-included HTTP server is overkill for that use case.
 **Update:** Well, I added WebSockets support, because I need it for
 something I'm working on. So it's not quite minimal anymore.
 
+## Conformance testing
+
+WebSockets conformance is tested against the
+[Autobahn|Testsuite](https://github.com/crossbario/autobahn-testsuite).
+
+Status: All suites except 6 (detection of invalid UTF-8 payloads), 12
+and 13 (WebSockets compression protocols) are currently passing. See
+[bench/README](./bench/README.md) for instructions on running the suite.
+
 ## Features
 
 - Single-threaded operation using [nbio](https://pkg.odin-lang.org/core/nbio/).
@@ -23,7 +32,7 @@ something I'm working on. So it's not quite minimal anymore.
   [virtual](https://pkg.odin-lang.org/core/mem/virtual/) memory.
 - Decent performance: echo server provides 75,000 req/sec on Linux, 50,000 req/sec on
   Windows. Real workloads will of course have higher latency.
-- WebSockets upgrade and framing.
+- WebSockets support tested against industry-standard conformance suite.
 
 ## Overview
 
