@@ -29,7 +29,7 @@ Request :: struct {
 	content: string,
 
 	is_websocket: bool,
-	ws_is_binary: bool,
+	ws_opcode: Websocket_Opcode,
 }
 
 Response :: struct {
@@ -39,7 +39,7 @@ Response :: struct {
 	keep_alive: bool,
 	is_websocket_handshake: bool,
 
-	ws_is_binary: bool,	// to specify websocket frame is binary (default text)
+	ws_opcode: Websocket_Opcode,
 }
 
 Handler :: proc(Request) -> Response
@@ -412,13 +412,18 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 
 	request: Request
 	request.is_websocket = true
-	request.ws_is_binary = df.opcode == .Binary
+	request.ws_opcode = df.opcode
 	request.content = string(conn.message[:])
 	response := conn.server.request_handler(request)
 	conn.message = nil	// arena
 
+	// If response opcode is .Invalid, it means the request message was ignored, and no response should be sent.
+	if response.ws_opcode == .Invalid {
+		return
+	}
+
 	// Encode response in a websocket frame
-	bytes := data_frame_encode(response.ws_is_binary ? .Binary : .Text, transmute([]u8)response.content, allocator)
+	bytes := data_frame_encode(response.ws_opcode, transmute([]u8)response.content, allocator)
 
 	// Websocket handler can close connection by setting keep_alive to false.
 	// NOTE: RFC6455 Sec. 5.5.1 Close protocol is not supported.

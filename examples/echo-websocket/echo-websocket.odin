@@ -36,10 +36,19 @@ handler_echo :: proc(req: http.Request) -> (res: http.Response) {
 		// Send response in res.content.
 		// Set res.keep_alive to true to keep connection open.
 		// RFC6455 Sec. 5.5.1 Close protocol is not supported, but is not required by RFC.
-		// Default response frame is text; set res.ws_is_binary to select binary.
 		res.keep_alive = true
 		res.content = req.content // echo
-		res.ws_is_binary = req.ws_is_binary
+
+		// Respond to Ping with Pong. An unsolicited Pong must be ignored.
+		// Otherwise, preserve text/binary. Any other opcode is a bug in the
+		// server.
+		switch req.ws_opcode {
+		case .Ping: res.ws_opcode = .Pong
+		case .Pong: res.ws_opcode = .Invalid
+		case .Text, .Binary: res.ws_opcode = req.ws_opcode
+		case .Close: res.ws_opcode = .Invalid // FIXME, .Close is not yet implemented
+		case .Invalid, .Continuation: res.ws_opcode = .Invalid
+		}
 	} else {
 		// Check for websocket upgrade request
 		is_upgrade: bool
