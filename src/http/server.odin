@@ -81,6 +81,7 @@ Connection :: struct {
 	read: [dynamic]u8,
 
 	is_websocket: bool,
+	is_fragmented: bool,
 	message: [dynamic]u8,
 	message_opcode: Websocket_Opcode,
 	more_frames: []u8,
@@ -97,11 +98,13 @@ connection_init :: proc(conn: ^Connection, server: ^Server, socket: nbio.TCP_Soc
 
 // Reinitialize a connection that is about to be reused. The connection was previously
 // released with `connection_release`.
-connection_reinit :: proc(conn: ^Connection, server: ^Server, socket: nbio.TCP_Socket) {
+connection_reinit :: proc(conn: ^Connection, server: ^Server, socket: nbio.TCP_Socket, is_websocket := false) {
 	conn.server = server
 	conn.socket = socket
 	conn.current_op = nil
-	conn.is_websocket = false
+	conn.is_websocket = is_websocket
+	conn.message = nil
+	conn.message_opcode = .Continuation
 
 	allocator := virtual.arena_allocator(&conn.arena)
 	conn.buffers = make([dynamic][]u8, 0, 8, allocator)
@@ -128,21 +131,30 @@ connection_release :: proc(conn: ^Connection, add_to_free_list := true) {
 	clear(&conn.read)
 
 	conn.is_websocket = false
+	conn.is_fragmented = false
 	conn.message = nil
 	conn.message_opcode = .Continuation
+
 }
 
 // Release buffers to prepare connection for another message on the same socket.
 connection_recycle :: proc(conn: ^Connection) {
+	if conn.is_websocket && conn.is_fragmented {
+		// In the middle of a fragmented message, we don't want to
+		// arena_free_all in connection_release.
+		allocator := virtual.arena_allocator(&conn.arena)
+		conn.buffers = make([dynamic][]u8, 0, 8, allocator)
+		conn.read = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
+		append(&conn.buffers, make([]u8, INITIAL_BUFFER_SIZE, allocator))
+		return
+	}
+
 	server := conn.server
 	socket := conn.socket
-
-	// save and restore websocket connection state since this is a
-	// recycled connection for the same client.
 	is_websocket := conn.is_websocket
+
 	connection_release(conn, add_to_free_list=false)
-	connection_reinit(conn, server, socket)
-	conn.is_websocket = is_websocket
+	connection_reinit(conn, server, socket, is_websocket)
 }
 
 // Deallocate all buffers allocated by the connection.
@@ -362,6 +374,34 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 }
 
 recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem.Allocator) -> (rest: []u8) {
+
+	maybe_protocol_error :: proc(conn: ^Connection, df: Websocket_Data_Frame, allocator: mem.Allocator) -> bool {
+		if df.length > 125 || !df.fin || df.rsv1 || df.rsv2 || df.rsv3 {
+			payload: [2]u8
+			endian.unchecked_put_u16be(payload[:], 1002)
+			bytes := data_frame_encode(.Close, payload[:], allocator)
+			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+			return true
+		}
+		return false
+	}
+
+	maybe_more_to_read_by_on_sent :: proc(conn: ^Connection, bytes_read: u64) {
+		if bytes_read < u64(len(conn.read)) {
+			// Prepare on_sent to handle the next frame
+			conn.more_frames = conn.read[bytes_read:]
+		} else {
+			conn.more_frames = nil
+		}
+	}
+
+	maybe_more_to_read_by_trampoline :: proc(conn: ^Connection, bytes_read: u64) -> (rest: []u8) {
+		if bytes_read < u64(len(conn.read)) {
+			rest = conn.read[bytes_read:]
+		}
+		return
+	}
+
 	df: Websocket_Data_Frame
 	bytes_read: u64
 	complete: bool
@@ -383,25 +423,42 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 	}
 
 	// From here, we have a full websocket frame.
+	// fmt.eprintfln("frame: op=%v, fin=%v", df.opcode, df.fin)
+	data_frame_decode(&df)
 
 	if conn.message == nil {
 		conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
 	}
 
-	// Record initial opcode (text/binary)
-	if df.opcode != .Continuation {
+	if df.opcode == .Ping {
+		if maybe_protocol_error(conn, df, allocator) do return
+
+		bytes := data_frame_encode(.Pong, df.encoded, allocator)
+		maybe_more_to_read_by_on_sent(conn, bytes_read)
+		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
+		return
+	} else if df.opcode == .Pong {
+		if maybe_protocol_error(conn, df, allocator) do return
+		rest = maybe_more_to_read_by_trampoline(conn, bytes_read)
+		return
+
+	} else if df.opcode == .Close {
+		bytes := data_frame_encode(.Close, nil, allocator)
+		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+		return
+	} else if df.opcode == .Text || df.opcode == .Binary {
 		conn.message_opcode = df.opcode
 	}
 
 	// Check for websocket message fragmentation.
 	if !df.fin {
-		data_frame_decode(&df)
 		append(&conn.message, ..df.encoded)
+		conn.is_fragmented = true
 
 		// The current read buffer is not drained; return to the loop to read
 		// the next frame.
-		if bytes_read < u64(len(conn.read)) {
-			rest = conn.read[bytes_read:]
+		rest = maybe_more_to_read_by_trampoline(conn, bytes_read)
+		if rest != nil {
 			return
 		} else {
 			// The read buffer is exhausted, so we need to queue another
@@ -413,11 +470,12 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
 			return
 		}
+	} else {
+		conn.is_fragmented = false
 	}
 
 	// From here, we have (at least) a complete message.
 
-	data_frame_decode(&df)
 	append(&conn.message, ..df.encoded)
 
 	request: Request
@@ -425,14 +483,6 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 	request.ws_opcode = conn.message_opcode
 	request.ws_fragmented = df.opcode == .Continuation
 	request.content = string(conn.message[:])
-
-	if is_websocket_protocol_error(request) {
-		payload: [2]u8
-		endian.unchecked_put_u16be(payload[:], 1002)
-		bytes := data_frame_encode(.Close, payload[:], allocator)
-		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
-		return
-	}
 
 	response := conn.server.request_handler(request)
 	conn.message = nil	// arena
@@ -452,12 +502,7 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 		// The recv buffer may include more than one frame, representing more
 		// messages. In that case, the on_sent callback will synchronously
 		// process the next frame, by calling us again.
-		if bytes_read < u64(len(conn.read)) {
-			// Prepare on_sent to handle the next frame
-			conn.more_frames = conn.read[bytes_read:]
-		} else {
-			conn.more_frames = nil
-		}
+		maybe_more_to_read_by_on_sent(conn, bytes_read)
 		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
 	} else {
 		// If the handler is closing the connection, we drop any unhandled

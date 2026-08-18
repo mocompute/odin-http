@@ -237,6 +237,7 @@ is_websocket_protocol_error :: proc(req: Request) -> bool {
 	return false
 }
 
+
 // A non-allocating version of strings.to_lower
 to_lower :: proc(s: string, buf: []u8) -> (res: string)  {
 	b := strings.builder_from_bytes(buf)
