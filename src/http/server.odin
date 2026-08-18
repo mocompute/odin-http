@@ -4,6 +4,7 @@ This file is part of https://github.com/mocompute/odin-http.
 package http
 
 import "core:container/xar"
+import "core:encoding/endian"
 @(require) import "core:fmt"
 import "core:mem"
 import "core:mem/virtual"
@@ -29,6 +30,7 @@ Request :: struct {
 	content: string,
 
 	is_websocket: bool,
+	ws_fragmented: bool,
 	ws_opcode: Websocket_Opcode,
 }
 
@@ -421,7 +423,17 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 	request: Request
 	request.is_websocket = true
 	request.ws_opcode = conn.message_opcode
+	request.ws_fragmented = df.opcode == .Continuation
 	request.content = string(conn.message[:])
+
+	if is_websocket_protocol_error(request) {
+		payload: [2]u8
+		endian.unchecked_put_u16be(payload[:], 1002)
+		bytes := data_frame_encode(.Close, payload[:], allocator)
+		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+		return
+	}
+
 	response := conn.server.request_handler(request)
 	conn.message = nil	// arena
 
