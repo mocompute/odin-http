@@ -139,6 +139,7 @@ data_frame_encode :: proc(op: Websocket_Opcode, payload: []u8, allocator: mem.Al
 		data[pos] = 126
 		pos += 1
 		endian.unchecked_put_u16be(data[pos:], u16(length))
+		pos += 2
 	} else {
 		data[pos] = u8(length)
 		pos += 1
