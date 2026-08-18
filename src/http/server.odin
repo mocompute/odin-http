@@ -427,6 +427,7 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 
 	// If response opcode is .Invalid, it means the request message was ignored, and no response should be sent.
 	if response.ws_opcode == .Invalid {
+		rest = conn.read[bytes_read:]
 		return
 	}
 
