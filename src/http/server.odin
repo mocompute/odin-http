@@ -78,6 +78,7 @@ Connection :: struct {
 
 	is_websocket: bool,
 	message: [dynamic]u8,
+	more_frames: []u8,
 }
 
 // Initialize a brand new connection: creates a virtual arena.
@@ -298,79 +299,24 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 	conn.buffers[0] = nil	// arena
 
 	if conn.is_websocket {
-		df: Websocket_Data_Frame
-		bytes_read: u64
-		complete: bool
-
-		// Handle a recv which has not even received a full websocket frame.
-		if len(conn.read) < 4 {
-			complete = false
-		} else {
-			df, complete, bytes_read = data_frame_parse(conn.read[:])
-		}
-		if !complete {
-			if is_timeout {
-				// Message is still incomplete, even after a timed out recv. We need to
-				// hang up from our side and send a 408.
-				send_and_close(conn, 408)
-				return
-			}
-			// Frame is incomplete (length indicates more bytes to read). Queue another recv, with a timeout.
-			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
-			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
-			return
-		}
-
-		// From here, we hae a full websocket frame.
-
-		if conn.message == nil {
-			conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
-		}
-
-		// Check for websocket message fragmentation.
-		if !df.fin {
-			data_frame_decode(&df)
-			append(&conn.message, ..df.encoded)
-
-			// If the read buffer extends into a following frame, we can't simply clear it.
-			if bytes_read < u64(len(conn.read)) {
-				remainder := u64(len(conn.read)) - bytes_read
-				copy(conn.read[:remainder], conn.read[bytes_read:])
-				resize(&conn.read, remainder)
+		// WebSocket is a framed protocol. A single socket read may include less
+		// than a full frame, exactly a single frame, multiple frames, or
+		// mulitple frames with an incomplete tail. On top of that, the protocol
+		// defines a logical `message` that can be delivered as one or more
+		// frames. The proc `recv_websocket_frame` will attempt to read a
+		// complete message; this loop will pump it in the case of a read buffer
+		// including multiple frames. Other cases are handled inside
+		// recv_websocket_frame, and on_sent.
+		loop: for {
+			rest := recv_websocket_frame(conn, is_timeout, allocator)
+			if len(rest) == 0 {
+				break loop
 			} else {
-				clear(&conn.read)
+				copy(conn.read[:], rest)
+				resize(&conn.read, len(rest))
+				is_timeout = false
 			}
-
-			// Queue another recv, with a timeout.
-			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
-			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
-			return
 		}
-
-		// From here, we have a complete message or end of fragmented message.
-		data_frame_decode(&df)
-		append(&conn.message, ..df.encoded)
-
-		request: Request
-		request.is_websocket = true
-		request.content = string(conn.message[:])
-		response := conn.server.request_handler(request)
-
-		// Encode response in a websocket frame
-		bytes := data_frame_encode(response.ws_is_binary ? .Binary : .Text, transmute([]u8)response.content, allocator)
-
-		// Websocket handler can close connection by setting keep_alive to false.
-		// TODO: RFC6455 Sec. 5.5.1 Close is not yet supported.
-		if response.keep_alive {
-			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
-		} else {
-			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
-		}
-
-		// TODO: what if the read buffer contains more than one websocket frame?
-		// Right now, it gets dropped on the floor. This is pathological for
-		// typical request/response websocket dialogue, but I suppose some
-		// applications might run into this.
 	} else {
 		request, err := parse_http_message(conn.read[:], allocator)
 		if is_timeout && err == .Incomplete {
@@ -408,6 +354,90 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 
 }
 
+recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem.Allocator) -> (rest: []u8) {
+	df: Websocket_Data_Frame
+	bytes_read: u64
+	complete: bool
+
+	df, complete, bytes_read = data_frame_parse(conn.read[:])
+
+	// Handle a recv which has not received a full websocket frame.
+	if !complete {
+		if is_timeout {
+			// Message is still incomplete, even after a timed out recv. We need to
+			// hang up from our side and send a 408.
+			send_and_close(conn, 408)
+			return
+		}
+		// Frame is incomplete (length indicates more bytes to read). Queue another recv, with a timeout.
+		conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
+		conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
+		return
+	}
+
+	// From here, we have a full websocket frame.
+
+	if conn.message == nil {
+		conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
+	}
+
+	// Check for websocket message fragmentation.
+	if !df.fin {
+		data_frame_decode(&df)
+		append(&conn.message, ..df.encoded)
+
+		// The current read buffer is not drained; return to the loop to read
+		// the next frame.
+		if bytes_read < u64(len(conn.read)) {
+			rest = conn.read[bytes_read:]
+			return
+		} else {
+			// The read buffer is exhausted, so we need to queue another
+			// recv to get more data. We use a timeout here, in case the
+			// client has disconnected.
+			clear(&conn.read)
+
+			conn.buffers[0] = make([]u8, CHUNK_SIZE, allocator)
+			conn.current_op = nbio.recv_poly(conn.socket, conn.buffers[:], conn, on_recv, timeout=5*time.Second)
+			return
+		}
+	}
+
+	// From here, we have (at least) a complete message.
+
+	data_frame_decode(&df)
+	append(&conn.message, ..df.encoded)
+
+	request: Request
+	request.is_websocket = true
+	request.content = string(conn.message[:])
+	response := conn.server.request_handler(request)
+	conn.message = nil	// arena
+
+	// Encode response in a websocket frame
+	bytes := data_frame_encode(response.ws_is_binary ? .Binary : .Text, transmute([]u8)response.content, allocator)
+
+	// Websocket handler can close connection by setting keep_alive to false.
+	// NOTE: RFC6455 Sec. 5.5.1 Close protocol is not supported.
+	if response.keep_alive {
+		// The recv buffer may include more than one frame, representing more
+		// messages. In that case, the on_sent callback will synchronously
+		// process the next frame, by calling us again.
+		if bytes_read < u64(len(conn.read)) {
+			// Prepare on_sent to handle the next frame
+			conn.more_frames = conn.read[bytes_read:]
+		} else {
+			conn.more_frames = nil
+		}
+		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
+	} else {
+		// If the handler is closing the connection, we drop any unhandled
+		// client messages on the floor.
+		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+	}
+	return
+}
+
 on_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
 	if op.send.err != nil {
 		connection_release(conn)
@@ -416,11 +446,19 @@ on_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		return
 	}
 
-	connection_recycle(conn)
+	// Handle the next websocket frame, if any.
+	if len(conn.more_frames) != 0 {
+		copy(conn.read[:], conn.more_frames)
+		resize(&conn.read, len(conn.more_frames))
+		allocator := virtual.arena_allocator(&conn.arena)
+		recv_websocket_frame(conn, false, allocator)
+	} else {
+		// Otherwise, recycle the connection and queue another recv.
+		connection_recycle(conn)
 
-	// Queue the receive for the next message from the client.
-	if sync.atomic_load(&conn.server.shutdown) do return
-	conn.current_op = nbio.recv_poly(op.send.socket, conn.buffers[:], conn, on_recv)
+		if sync.atomic_load(&conn.server.shutdown) do return
+		conn.current_op = nbio.recv_poly(op.send.socket, conn.buffers[:], conn, on_recv)
+	}
 }
 
 on_sent_close :: proc(op: ^nbio.Operation, conn: ^Connection) {
