@@ -2,26 +2,40 @@
 
 A minimal HTTP/1.1 server suitable for embedded use.
 
+Written by hand, and tested for standards conformance using external test suites.
+
+## Development status
+
+- Full RFC6455 WebSocket Protocol conformance, excluding WebSocket compression. (VERIFIED)
+- Partial RFC9112 HTTP/1.1 conformance: excludes compression. (UNVERIFIED)
+- Partial RFC9110 HTTP Semantics conformance: excludes compression. (UNVERIFIED)
+
+Of course, since WebSockets conformance has been verified, this in turn implies that at
+least the parts of the HTTP protocol required to negotiate a WebSockets connection have
+also been verified.
+
+## Overview
+
 This package is stripped to the bare minimum, so you can build on it. It handles the
-sockets and the HTTP framing protocol, and nothing else. In particular, the parts of
-HTTP semantics that focus on target resources are not provided by this package.
+sockets and the HTTP and WebSocket framing protocols, and nothing else. In particular,
+the parts of HTTP semantics that focus on target resources are not provided by this
+package.
 
 Why? Sometimes it's nice to embed a small server inside an application to communicate
 with it from the outside world, and rather than build your own TCP protocol, HTTP gives
 you a very simple foundation: verbs, targets, metadata, and data. A full
 batteries-included HTTP server is overkill for that use case.
 
-**Update:** Well, I added WebSockets support, because I need it for
-something I'm working on. So it's not quite minimal anymore.
-
 ## Conformance testing
 
 WebSockets conformance is tested against the
 [Autobahn|Testsuite](https://github.com/crossbario/autobahn-testsuite).
 
-Status: All suites except 6 (detection of invalid UTF-8 payloads), 12
-and 13 (WebSockets compression protocols) are currently passing. See
-[bench/README](./bench/README.md) for instructions on running the suite.
+Status: All suites except 12 and 13 (WebSockets compression protocols) are currently
+passing. See [bench/README](./bench/README.md) for instructions on running the suite.
+
+No HTTP (apart from WebSockets) conformance testing hase been done yet, apart from
+stress testing a simple echo server.
 
 ## Features
 
@@ -30,11 +44,11 @@ and 13 (WebSockets compression protocols) are currently passing. See
 - Gracefully handles socket exhaustion (server overload) and slow clients.
 - Connection pool to minimise memory allocations. Uses Odin's
   [virtual](https://pkg.odin-lang.org/core/mem/virtual/) memory.
-- Decent performance: echo server provides 75,000 req/sec on Linux, 50,000 req/sec on
+- Good performance: echo server provides 75,000 req/sec on Linux, 50,000 req/sec on
   Windows. Real workloads will of course have higher latency.
 - WebSockets support tested against industry-standard conformance suite.
 
-## Overview
+## Implementation commentary
 
 Writing an HTTP server on top of sockets is finicky work, even before dealing with
 multiple platforms. Luckily, Odin's nbio makes light work of multi-platform support. But
@@ -69,8 +83,5 @@ after receiving the next chunk, we send back a 408 Request Timeout.
 
 ### Limitations
 
-A fully RFC9110/9112 compliant HTTP/1.1 server will need to also implement the full set
-of required semantics. For example, the `Content-Location` header has a [special
-meaning](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.7-1), etc. Full HTTP
-target resource semantics are out of scope for this minimal library, but would be easy
-to build on top of it.
+Full HTTP target resource semantics are out of scope for this minimal library, but would
+be easy to build on top of it.

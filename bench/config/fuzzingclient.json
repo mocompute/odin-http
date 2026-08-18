@@ -2,5 +2,5 @@
     "outdir": "./reports",
     "servers": [{"agent": "odin-http", "url": "ws://localhost:8123"}],
     "cases": ["*"],
-    "exclude-cases": ["6.*", "12.*", "13.*"]
+    "ignore-exclude-cases": ["12.*", "13.*"]
 }

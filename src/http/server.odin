@@ -16,6 +16,7 @@ import "core:sync"
 import "core:time"
 import "core:time/datetime"
 import "core:time/timezone"
+import "core:unicode/utf8"
 
 INITIAL_BUFFER_SIZE :: 4 * 1024
 INITIAL_CONNECTION_BUFFERS :: 8
@@ -414,6 +415,19 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 		return
 	}
 
+	maybe_invalid_utf8 :: proc(conn: ^Connection, req: Request, allocator: mem.Allocator) -> bool {
+		if req.ws_opcode != .Text do return false
+
+		if !utf8.valid_string(req.content) {
+			payload: [2]u8
+			endian.unchecked_put_u16be(payload[:], 1007)
+			bytes := data_frame_encode(.Close, payload[:], allocator)
+			conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent_close)
+			return true
+		}
+		return false
+	}
+
 	df: Websocket_Data_Frame
 	bytes_read: u64
 	complete: bool
@@ -494,6 +508,9 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 	request.ws_opcode = conn.message_opcode
 	request.ws_fragmented = df.opcode == .Continuation
 	request.content = string(conn.message[:])
+
+	// check UTF-8 valid
+	if maybe_invalid_utf8(conn, request, allocator) do return
 
 	response := conn.server.request_handler(request)
 	conn.message = nil	// arena
