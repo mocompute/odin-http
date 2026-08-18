@@ -221,23 +221,6 @@ maybe_websocket_upgrade :: proc(req: Request, allocator: mem.Allocator) -> (res:
 	return res, true, res.status
 }
 
-is_websocket_protocol_error :: proc(req: Request) -> bool {
-	is_control_frame: bool
-	switch req.ws_opcode {
-	case .Ping, .Pong, .Close: is_control_frame = true
-	case .Continuation, .Text, .Binary, .Invalid: is_control_frame = false
-	}
-
-	if is_control_frame {
-		if len(req.content) > 125 || req.ws_fragmented {
-			return true
-		}
-	}
-
-	return false
-}
-
-
 // A non-allocating version of strings.to_lower
 to_lower :: proc(s: string, buf: []u8) -> (res: string)  {
 	b := strings.builder_from_bytes(buf)

@@ -103,8 +103,10 @@ connection_reinit :: proc(conn: ^Connection, server: ^Server, socket: nbio.TCP_S
 	conn.socket = socket
 	conn.current_op = nil
 	conn.is_websocket = is_websocket
+	conn.is_fragmented = false
 	conn.message = nil
 	conn.message_opcode = .Continuation
+	conn.more_frames = nil
 
 	allocator := virtual.arena_allocator(&conn.arena)
 	conn.buffers = make([dynamic][]u8, 0, 8, allocator)
@@ -376,7 +378,16 @@ on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
 recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem.Allocator) -> (rest: []u8) {
 
 	maybe_protocol_error :: proc(conn: ^Connection, df: Websocket_Data_Frame, allocator: mem.Allocator) -> bool {
-		if df.length > 125 || !df.fin || df.rsv1 || df.rsv2 || df.rsv3 {
+		reserved_bit_set := df.rsv1 || df.rsv2 || df.rsv3
+		invalid_control := (df.opcode == .Ping || df.opcode == .Pong || df.opcode == .Close) &&
+			(df.length > 125 || !df.fin)
+		non_continuation := conn.message_opcode == .Continuation && df.opcode == .Continuation
+		expected_continuation := conn.message_opcode != .Continuation && conn.is_fragmented &&
+			(df.opcode == .Text || df.opcode == .Binary)
+		unexpected_continuation := df.opcode == .Continuation && !conn.is_fragmented
+
+		if reserved_bit_set || invalid_control || non_continuation || expected_continuation || unexpected_continuation {
+			// fmt.eprintfln("reserved_bit=%v, invalid_control=%v, non_continuation=%v, expected_cont=%v", reserved_bit_set, invalid_control, non_continuation, expected_continuation)
 			payload: [2]u8
 			endian.unchecked_put_u16be(payload[:], 1002)
 			bytes := data_frame_encode(.Close, payload[:], allocator)
@@ -430,15 +441,14 @@ recv_websocket_frame :: proc(conn: ^Connection, is_timeout: bool, allocator: mem
 		conn.message = make([dynamic]u8, 0, CHUNK_SIZE, allocator)
 	}
 
-	if df.opcode == .Ping {
-		if maybe_protocol_error(conn, df, allocator) do return
+	if maybe_protocol_error(conn, df, allocator) do return
 
+	if df.opcode == .Ping {
 		bytes := data_frame_encode(.Pong, df.encoded, allocator)
 		maybe_more_to_read_by_on_sent(conn, bytes_read)
 		conn.current_op = nbio.send_poly(conn.socket, {bytes}, conn, on_sent)
 		return
 	} else if df.opcode == .Pong {
-		if maybe_protocol_error(conn, df, allocator) do return
 		rest = maybe_more_to_read_by_trampoline(conn, bytes_read)
 		return
 
