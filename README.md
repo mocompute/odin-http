@@ -10,8 +10,8 @@ Written by hand, and tested for standards conformance using external test suites
 - Partial RFC9112 HTTP/1.1 conformance: excludes compression. (UNVERIFIED)
 - Partial RFC9110 HTTP Semantics conformance: excludes compression. (UNVERIFIED)
 
-Of course, since WebSockets conformance has been verified, this in turn implies that at
-least the parts of the HTTP protocol required to negotiate a WebSockets connection have
+Of course, since WebSocket conformance has been verified, this in turn implies that at
+least the parts of the HTTP protocol required to negotiate a WebSocket connection have
 also been verified.
 
 ## Overview
@@ -28,13 +28,13 @@ batteries-included HTTP server is overkill for that use case.
 
 ## Conformance testing
 
-WebSockets conformance is tested against the
+WebSocket conformance is tested against the
 [Autobahn|Testsuite](https://github.com/crossbario/autobahn-testsuite).
 
-Status: All suites except 12 and 13 (WebSockets compression protocols) are currently
+Status: All suites except 12 and 13 (WebSocket compression protocols) are currently
 passing. See [bench/README](./bench/README.md) for instructions on running the suite.
 
-No HTTP (apart from WebSockets) conformance testing hase been done yet, apart from
+No HTTP (apart from WebSocket) conformance testing has been done yet, apart from
 stress testing a simple echo server.
 
 ## Features
@@ -46,7 +46,7 @@ stress testing a simple echo server.
   [virtual](https://pkg.odin-lang.org/core/mem/virtual/) memory.
 - Good performance: echo server provides 75,000 req/sec on Linux, 50,000 req/sec on
   Windows. Real workloads will of course have higher latency.
-- WebSockets support tested against industry-standard conformance suite.
+- WebSocket support tested against industry-standard conformance suite.
 
 ## Implementation commentary
 
